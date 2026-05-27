@@ -1,0 +1,19 @@
+{
+  "providers": {
+    "example-provider": {
+      "name": "Example Provider",
+      "icon": "🤖",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://api.example.com",
+        "ANTHROPIC_AUTH_TOKEN": "your-api-token-here",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "model-name",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "model-name",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "model-name",
+        "ANTHROPIC_MODEL": "model-name"
+      },
+      "model": "opus[1m]",
+      "endpoint": "https://api.example.com"
+    }
+  },
+  "lastSelection": {}
+}
