@@ -154,44 +154,64 @@ if [[ -z "$selected_key" ]]; then
   exit 0
 fi
 
+# --- 通过环境变量注入 provider 配置 ---
+# Claude Code 中 shell 环境变量优先级高于 settings.json 的 env/model 字段，
+# 因此把 provider 配置注入到当前进程环境即可，无需写入共享的 .claude/settings.json。
+# 这样每个 claude 进程持有独立的 provider 配置，同一目录下可同时运行多个不同模型，互不覆盖。
+apply_provider_env() {
+  local key="$1"
+  provider_env=$(jq -c '.providers["'"$key"'"].env // {}' "$PROVIDERS_FILE")
+  # 实际模型名：优先 ANTHROPIC_DEFAULT_OPUS_MODEL，回退 ANTHROPIC_MODEL，再回退 model 别名
+  actual_model=$(printf '%s' "$provider_env" | jq -r '.ANTHROPIC_DEFAULT_OPUS_MODEL // .ANTHROPIC_MODEL // empty')
+  if [[ -z "$actual_model" ]]; then
+    actual_model=$(jq -r '.providers["'"$key"'"].model // "opus[1m]"' "$PROVIDERS_FILE")
+  fi
+  # 导出 provider 的全部 env（ANTHROPIC_* 等），并强制 ANTHROPIC_MODEL 与实际模型名一致
+  eval "$(printf '%s' "$provider_env" | jq -r 'to_entries[] | "export \(.key)=\(.value | @sh)"')"
+  export ANTHROPIC_MODEL="$actual_model"
+}
+
+# --- 同步共用配置到项目 settings.json ---
+# permissions / hooks / plugins / statusLine 等对所有窗口和 provider 通用，
+# 写共享文件安全（内容一致，热重载无副作用）。
+# 模型相关的 ANTHROPIC_* env 和 model 字段不写入，改由环境变量按进程注入，保证多窗口隔离。
+sync_shared_settings() {
+  local global="$HOME/.claude/settings.json"
+  mkdir -p "$PROJECT_DIR/.claude"
+  local base="{}"
+  if [[ -f "$global" ]]; then
+    base="$global"
+  elif [[ -f "$PROJECT_SETTINGS" ]]; then
+    base="$PROJECT_SETTINGS"
+  fi
+  # 以基础配置为准，删除顶层 model 与 env 中所有 ANTHROPIC_* 键，其余共用配置原样保留
+  jq 'del(.model) | .env = ((.env // {}) | with_entries(select(.key | startswith("ANTHROPIC_") | not)))' \
+    "$base" > "${PROJECT_SETTINGS}.tmp" \
+    && mv "${PROJECT_SETTINGS}.tmp" "$PROJECT_SETTINGS"
+}
+
+# --- 同步共用配置（与 provider 选择无关，所有窗口通用） ---
+sync_shared_settings
+
 # --- 处理"保持当前"选项 ---
 if [[ "$selected_key" == "__KEEP_CURRENT__" ]]; then
-  echo "  ✅ Keeping current settings"
+  if [[ -n "$last_key" ]]; then
+    apply_provider_env "$last_key"
+    echo "  ✅ Keeping current: $last_key (${actual_model})  [via env]"
+  else
+    echo "  ✅ Keeping current (no previous selection)"
+  fi
   exec claude --dangerously-skip-permissions --effort high "$@"
 fi
 
 # --- 提取供应商配置 ---
-provider_env=$(jq -c '.providers["'"$selected_key"'"].env' "$PROVIDERS_FILE")
 provider_model=$(jq -r '.providers["'"$selected_key"'"].model // "opus[1m]"' "$PROVIDERS_FILE")
 provider_name=$(jq -r '.providers["'"$selected_key"'"].name' "$PROVIDERS_FILE")
 provider_icon=$(jq -r '.providers["'"$selected_key"'"].icon // ""' "$PROVIDERS_FILE")
 
-# 从 env 中提取实际模型名（优先 ANTHROPIC_DEFAULT_OPUS_MODEL，回退到 ANTHROPIC_MODEL）
-actual_model=$(echo "$provider_env" | jq -r '.ANTHROPIC_DEFAULT_OPUS_MODEL // .ANTHROPIC_MODEL // empty')
-if [[ -z "$actual_model" ]]; then
-  actual_model="$provider_model"
-fi
+apply_provider_env "$selected_key"
 
-GLOBAL_SETTINGS="$HOME/.claude/settings.json"
-
-# --- 同步到项目 settings.json ---
-mkdir -p "$PROJECT_DIR/.claude"
-
-# 以全局配置为基础，只替换 ANTHROPIC_* env 和 model，并强制 ANTHROPIC_MODEL 与实际模型一致
-if [[ -f "$GLOBAL_SETTINGS" ]]; then
-  jq --argjson new_env "$provider_env" --arg model "$actual_model" '
-    .env //= {} |
-    .env |= (with_entries(select(.key | startswith("ANTHROPIC_") | not)) * $new_env) |
-    .env.ANTHROPIC_MODEL = $model |
-    .model = $model
-  ' "$GLOBAL_SETTINGS" > "${PROJECT_SETTINGS}.tmp" \
-    && mv "${PROJECT_SETTINGS}.tmp" "$PROJECT_SETTINGS"
-else
-  jq -n --argjson new_env "$provider_env" --arg model "$actual_model" \
-    '{env: ($new_env + {ANTHROPIC_MODEL: $model}), model: $model}' > "$PROJECT_SETTINGS"
-fi
-
-echo "  ${provider_icon} Switched to: ${provider_name} (${actual_model})"
+echo "  ${provider_icon} Switched to: ${provider_name} (${actual_model})  [via env, multi-window safe]"
 
 # --- 记住选择 ---
 jq --arg path "$PROJECT_DIR" --arg key "$selected_key" \
